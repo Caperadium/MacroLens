@@ -1,4 +1,9 @@
-"""Panel 3 — Bond Market stress monitor."""
+"""Panel 3 — Bond Market Stress Monitor.
+
+Sub-panels per PRD:
+  3a — Yield Levels
+  3b — Yield Curve Shape (2s10s, 30s2s, Bear/Bull regime flag)
+"""
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -7,23 +12,21 @@ import pandas as pd
 from data.fred import fetch_with_fallback
 from data.calculated import (
     classify_yield_curve_move,
-    dollar_yield_divergence,
     calculate_panel_score,
 )
 from config import FRED_SERIES, PLOTLY_LAYOUT
 
 
 # ---------------------------------------------------------------------------
-# Data loading (cached per Streamlit session for 1 hour)
+# Data loading
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def load_bond_data() -> tuple[dict, dict]:
-    """Fetch all Panel 3 + DXY series. Returns (data_dict, status_dict)."""
+    """Fetch all Panel 3 series. Returns (data_dict, status_dict)."""
     series_names = [
         "yield_3m", "yield_2yr", "yield_10yr", "yield_30yr",
         "breakeven_10yr", "term_premium_10yr", "spread_2s10s",
-        "dxy_proxy",
     ]
     data, statuses = {}, {}
     for name in series_names:
@@ -39,26 +42,41 @@ def load_bond_data() -> tuple[dict, dict]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _current(series: pd.Series | None) -> float | None:
-    if series is None or series.empty:
+def _current(s: pd.Series | None) -> float | None:
+    if s is None or s.empty:
         return None
-    return float(series.dropna().iloc[-1])
+    return float(s.dropna().iloc[-1])
 
 
-def _offset(series: pd.Series | None, trading_days_back: int) -> float | None:
-    """Value approximately N trading days ago."""
-    if series is None or series.empty:
+def _offset(s: pd.Series | None, trading_days_back: int) -> float | None:
+    if s is None or s.empty:
         return None
-    s = series.dropna()
-    idx = max(0, len(s) - 1 - trading_days_back)
-    return float(s.iloc[idx])
+    clean = s.dropna()
+    idx = max(0, len(clean) - 1 - trading_days_back)
+    return float(clean.iloc[idx])
 
 
-def _tail(series: pd.Series | None, trading_days: int) -> pd.Series | None:
-    if series is None or series.empty:
-        return series
-    return series.dropna().tail(trading_days)
+def _tail(s: pd.Series | None, n: int) -> pd.Series | None:
+    if s is None or s.empty:
+        return s
+    return s.dropna().tail(n)
 
+
+def _calculate_30s2s(data: dict) -> pd.Series | None:
+    """30yr minus 2yr yield spread in basis points."""
+    y30 = data.get("yield_30yr")
+    y2  = data.get("yield_2yr")
+    if y30 is None or y2 is None:
+        return None
+    combined = pd.DataFrame({"y30": y30, "y2": y2}).dropna()
+    if combined.empty:
+        return None
+    return (combined["y30"] - combined["y2"]) * 100  # bps
+
+
+# ---------------------------------------------------------------------------
+# Status colours
+# ---------------------------------------------------------------------------
 
 def _yield_status(v: float | None) -> str:
     if v is None:
@@ -80,13 +98,24 @@ def _term_premium_status(v: float | None) -> str:
     return "green"
 
 
-def _spread_status(bps: float | None) -> str:
-    """Higher stress when the curve is more deeply inverted."""
+def _2s10s_status(bps: float | None) -> str:
+    """Deeply inverted = red (recession signal)."""
     if bps is None:
         return "green"
     if bps <= -50:
         return "red"
     if bps <= 0:
+        return "yellow"
+    return "green"
+
+
+def _30s2s_status(bps: float | None) -> str:
+    """Long-end fiscal confidence — compressing long end = stress."""
+    if bps is None:
+        return "green"
+    if bps < 50:
+        return "red"
+    if bps < 150:
         return "yellow"
     return "green"
 
@@ -102,7 +131,7 @@ def _breakeven_status(v: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Status badge component
+# Status badge
 # ---------------------------------------------------------------------------
 
 def render_status_badge(
@@ -125,7 +154,7 @@ def render_status_badge(
 
 
 # ---------------------------------------------------------------------------
-# Chart renderers
+# Chart helpers
 # ---------------------------------------------------------------------------
 
 def _base_layout(title: str, height: int, **overrides) -> dict:
@@ -135,49 +164,48 @@ def _base_layout(title: str, height: int, **overrides) -> dict:
     return layout
 
 
-def render_yield_curve_chart(data: dict, trading_days: int) -> None:
-    """Snapshot yield curve: current vs 1M ago vs 6M ago."""
+# ---------------------------------------------------------------------------
+# Sub-panel 3a — Yield Levels charts
+# ---------------------------------------------------------------------------
+
+def render_yield_curve_snapshot(data: dict) -> None:
+    """Current / 1M ago / 6M ago yield curve shape."""
     maturities = ["3M", "2Y", "10Y", "30Y"]
     keys       = ["yield_3m", "yield_2yr", "yield_10yr", "yield_30yr"]
 
-    current  = [_current(data.get(k)) for k in keys]
-    one_mo   = [_offset(data.get(k), 21)  for k in keys]
-    six_mo   = [_offset(data.get(k), 126) for k in keys]
+    current = [_current(data.get(k))    for k in keys]
+    one_mo  = [_offset(data.get(k), 21) for k in keys]
+    six_mo  = [_offset(data.get(k), 126) for k in keys]
 
     fig = go.Figure()
-
     if any(v is not None for v in six_mo):
         fig.add_trace(go.Scatter(
             x=maturities, y=six_mo, name="6M ago",
             mode="lines+markers",
-            line=dict(color="#444444", width=2, dash="dot"),
-            marker=dict(size=5),
+            line=dict(color="#444444", width=2, dash="dot"), marker=dict(size=5),
         ))
     if any(v is not None for v in one_mo):
         fig.add_trace(go.Scatter(
             x=maturities, y=one_mo, name="1M ago",
             mode="lines+markers",
-            line=dict(color="#888888", width=2),
-            marker=dict(size=5),
+            line=dict(color="#888888", width=2), marker=dict(size=5),
         ))
     if any(v is not None for v in current):
         fig.add_trace(go.Scatter(
             x=maturities, y=current, name="Current",
             mode="lines+markers",
-            line=dict(color="#FFFFFF", width=3),
-            marker=dict(size=7),
+            line=dict(color="#FFFFFF", width=3), marker=dict(size=7),
         ))
 
     fig.update_layout(**_base_layout(
-        "Yield Curve Shape", 260,
-        xaxis_title="Maturity",
-        yaxis_title="Yield (%)",
+        "Yield Curve Shape — Current vs 1M ago vs 6M ago", 260,
+        xaxis_title="Maturity", yaxis_title="Yield (%)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     ))
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_10yr_yield_chart(data: dict, trading_days: int) -> None:
+def render_10yr_chart(data: dict, trading_days: int) -> None:
     s = _tail(data.get("yield_10yr"), trading_days)
     if s is None or s.empty:
         st.warning("10-Year yield data unavailable.")
@@ -191,49 +219,12 @@ def render_10yr_yield_chart(data: dict, trading_days: int) -> None:
     ))
     fig.add_hline(
         y=5.0, line_color="#FF4444", line_dash="dash", line_width=1.5,
-        annotation_text="5.0%", annotation_position="top right",
+        annotation_text="5.0% threshold", annotation_position="top right",
         annotation=dict(font_color="#FF4444", font_size=11),
     )
     fig.update_layout(**_base_layout(
         "10-Year Treasury Yield", 210,
         yaxis_title="Yield (%)", showlegend=False,
-    ))
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_2s10s_chart(data: dict, trading_days: int) -> None:
-    """2s10s spread in basis points (T10Y2Y × 100)."""
-    raw = _tail(data.get("spread_2s10s"), trading_days)
-    if raw is None or raw.empty:
-        st.warning("2s10s spread data unavailable.")
-        return
-
-    bps = raw * 100  # FRED T10Y2Y is in %, convert to bps
-
-    fig = go.Figure()
-    # Green fill above zero, red fill below zero
-    fig.add_trace(go.Scatter(
-        x=bps.index, y=bps.clip(lower=0).values,
-        name="Positive", mode="lines",
-        line=dict(color="rgba(0,204,68,0)", width=0),
-        fill="tozeroy", fillcolor="rgba(0,204,68,0.18)",
-        showlegend=False,
-    ))
-    fig.add_trace(go.Scatter(
-        x=bps.index, y=bps.clip(upper=0).values,
-        name="Negative", mode="lines",
-        line=dict(color="rgba(255,68,68,0)", width=0),
-        fill="tozeroy", fillcolor="rgba(255,68,68,0.22)",
-        showlegend=False,
-    ))
-    fig.add_trace(go.Scatter(
-        x=bps.index, y=bps.values, name="2s10s",
-        mode="lines", line=dict(color="#AAAAAA", width=1.5),
-    ))
-    fig.add_hline(y=0, line_color="#555555", line_width=1)
-    fig.update_layout(**_base_layout(
-        "2s10s Spread (10Y − 2Y)", 210,
-        yaxis_title="Basis Points", showlegend=False,
     ))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -259,64 +250,67 @@ def render_term_premium_chart(data: dict, trading_days: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dollar/yield divergence flag
+# Sub-panel 3b — Yield Curve Shape charts
 # ---------------------------------------------------------------------------
 
-def render_divergence_flag(data: dict) -> None:
-    yield_s = data.get("yield_10yr")
-    dxy_s   = data.get("dxy_proxy")
+def render_spreads_chart(data: dict, trading_days: int) -> None:
+    """2s10s and 30s2s spreads on one dual-line chart."""
+    raw_2s10s = _tail(data.get("spread_2s10s"), trading_days)
+    spread_30s2s = _calculate_30s2s(data)
+    spread_30s2s = _tail(spread_30s2s, trading_days) if spread_30s2s is not None else None
 
-    if yield_s is None or dxy_s is None:
-        return
+    fig = go.Figure()
 
-    result = dollar_yield_divergence(yield_s, dxy_s)
-    flag   = result["flag"]
+    if raw_2s10s is not None and not raw_2s10s.empty:
+        bps_2s10s = raw_2s10s * 100
+        # Green fill above zero, red fill below
+        fig.add_trace(go.Scatter(
+            x=bps_2s10s.index, y=bps_2s10s.clip(lower=0).values,
+            mode="lines", line=dict(color="rgba(0,204,68,0)", width=0),
+            fill="tozeroy", fillcolor="rgba(0,204,68,0.15)",
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=bps_2s10s.index, y=bps_2s10s.clip(upper=0).values,
+            mode="lines", line=dict(color="rgba(255,68,68,0)", width=0),
+            fill="tozeroy", fillcolor="rgba(255,68,68,0.20)",
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=bps_2s10s.index, y=bps_2s10s.values,
+            name="2s10s (10Y−2Y)", mode="lines",
+            line=dict(color="#AAAAAA", width=1.8),
+        ))
 
-    color_map = {
-        "crisis_signal": ("#FF0000", "🔴", "CRISIS SIGNAL"),
-        "normal_stress": ("#FFCC00", "🟡", "NORMAL STRESS"),
-        "neutral":       ("#00CC44", "🟢", "NEUTRAL"),
-    }
-    color, icon, label = color_map.get(flag, ("#888888", "⚪", "UNKNOWN"))
+    if spread_30s2s is not None and not spread_30s2s.empty:
+        fig.add_trace(go.Scatter(
+            x=spread_30s2s.index, y=spread_30s2s.values,
+            name="30s2s (30Y−2Y)", mode="lines",
+            line=dict(color="#FF8800", width=1.8, dash="dot"),
+        ))
 
-    st.markdown(
-        f"""
-        <div style="border:1px solid {color}; border-left:4px solid {color};
-                    padding:10px 14px; margin:8px 0; border-radius:0 4px 4px 0;
-                    background:rgba(255,255,255,0.03);">
-            <div style="font-size:10px;color:#888;text-transform:uppercase;
-                        letter-spacing:0.6px;">Dollar / Yield Divergence</div>
-            <div style="font-size:15px;font-weight:bold;color:{color};
-                        margin:4px 0;">{icon}&nbsp;{label}</div>
-            <div style="font-size:12px;color:#ccc;">{result['description']}</div>
-            <div style="font-size:10px;color:#666;margin-top:4px;">
-                Yield trend: <b>{result['yield_trend']}</b> &nbsp;|&nbsp;
-                Dollar trend: <b>{result['dollar_trend']}</b>
-                &nbsp;(20-day window)
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    fig.add_hline(y=0, line_color="#555555", line_width=1)
+    fig.update_layout(**_base_layout(
+        "Yield Curve Spreads", 250,
+        yaxis_title="Basis Points",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    ))
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
-# Alert banners (in-app only for Phase 1)
+# Active alert banners
 # ---------------------------------------------------------------------------
 
 def _check_active_alerts(
     y10yr: float | None,
     breakeven: float | None,
-    divergence_flag: str,
 ) -> list[tuple[str, str]]:
-    """Return list of (severity, message) for active threshold breaches."""
     alerts = []
     if y10yr is not None and y10yr >= 5.0:
         alerts.append(("critical", f"10-Year yield {y10yr:.2f}% — above 5.0% threshold"))
     if breakeven is not None and breakeven > 2.75:
-        alerts.append(("warning", f"10Y breakeven {breakeven:.2f}% — above 2.75% threshold"))
-    if divergence_flag == "crisis_signal":
-        alerts.append(("critical", "Dollar/yield crisis signal active"))
+        alerts.append(("warning", f"10Y breakeven {breakeven:.2f}% — above 2.75%"))
     return alerts
 
 
@@ -325,50 +319,44 @@ def _check_active_alerts(
 # ---------------------------------------------------------------------------
 
 def render_panel_bonds(trading_days: int = 252) -> None:
-    st.subheader("Panel 3 — Bond Market")
+    st.subheader("Panel 3 — Bond Market Stress Monitor")
 
     with st.spinner("Loading bond market data…"):
         data, statuses = load_bond_data()
 
-    # Stale / error warnings
     for name, status in statuses.items():
         if status == "stale":
-            st.warning(f"⚠️ {name}: live fetch failed — showing last cached value.")
+            st.warning(f"⚠️ {name}: live fetch failed — showing cached value.")
         elif status == "error":
-            st.error(f"❌ {name}: data unavailable. Check FRED_API_KEY or network.")
+            st.error(f"❌ {name}: unavailable.")
 
-    # ---- Derive current values ----
-    y3m     = _current(data.get("yield_3m"))
-    y2yr    = _current(data.get("yield_2yr"))
-    y10yr   = _current(data.get("yield_10yr"))
-    y30yr   = _current(data.get("yield_30yr"))
-    be      = _current(data.get("breakeven_10yr"))
-    tp      = _current(data.get("term_premium_10yr"))
+    # Current values
+    y3m   = _current(data.get("yield_3m"))
+    y2yr  = _current(data.get("yield_2yr"))
+    y10yr = _current(data.get("yield_10yr"))
+    y30yr = _current(data.get("yield_30yr"))
+    be    = _current(data.get("breakeven_10yr"))
+    tp    = _current(data.get("term_premium_10yr"))
 
-    raw_spread     = _current(data.get("spread_2s10s"))
-    spread_bps     = raw_spread * 100 if raw_spread is not None else None
+    raw_spread    = _current(data.get("spread_2s10s"))
+    spread_bps    = raw_spread * 100 if raw_spread is not None else None
 
-    raw_spread_20  = _offset(data.get("spread_2s10s"), 20)
-    spread_bps_20  = raw_spread_20 * 100 if raw_spread_20 is not None else None
-    y2yr_20        = _offset(data.get("yield_2yr"), 20)
+    raw_spread_20 = _offset(data.get("spread_2s10s"), 20)
+    spread_bps_20 = raw_spread_20 * 100 if raw_spread_20 is not None else None
+    y2yr_20       = _offset(data.get("yield_2yr"), 20)
 
-    # Yield curve regime classification
+    # 30s2s
+    s30s2s_series = _calculate_30s2s(data)
+    spread_30s2s  = _current(s30s2s_series) if s30s2s_series is not None else None
+
+    # Regime classification (uses 2s10s and 2yr per spec)
     curve_label = "—"
     if all(v is not None for v in [spread_bps, spread_bps_20, y2yr, y2yr_20]):
         curve_label = classify_yield_curve_move(
             spread_bps, spread_bps_20, y2yr, y2yr_20
         )
 
-    # Divergence flag (needed for alerts + badge)
-    dxy_s = data.get("dxy_proxy")
-    y10_s = data.get("yield_10yr")
-    div_result = (
-        dollar_yield_divergence(y10_s, dxy_s)
-        if y10_s is not None and dxy_s is not None
-        else {"flag": "neutral"}
-    )
-
-    # Panel composite score
+    # Composite score
     panel_score = calculate_panel_score("bonds", {
         "yield_10yr":              y10yr,
         "term_premium":            tp,
@@ -376,75 +364,99 @@ def render_panel_bonds(trading_days: int = 252) -> None:
         "breakeven_10yr":          be,
     })
 
-    # Active alerts
-    active_alerts = _check_active_alerts(y10yr, be, div_result["flag"])
-    for severity, msg in active_alerts:
+    # Alert banners
+    for severity, msg in _check_active_alerts(y10yr, be):
         if severity == "critical":
             st.error(f"🚨 {msg}")
         else:
             st.warning(f"⚠️ {msg}")
 
-    # ---- Layout: badges | charts ----
+    score_color = "#FF4444" if panel_score >= 7 else "#FFCC00" if panel_score >= 5 else "#00CC44"
+    st.markdown(
+        f"<div style='font-size:13px;color:#888;'>Bond Stress Score</div>"
+        f"<div style='font-size:26px;font-weight:bold;color:{score_color};"
+        f"margin-bottom:14px;'>{panel_score} / 10</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- Sub-panel 3a: Yield Levels ----
+    st.markdown("**Sub-panel 3a — Yield Levels**")
+
     col_b, col_c = st.columns([1, 2])
 
     with col_b:
-        score_color = "#FF4444" if panel_score >= 7 else "#FFCC00" if panel_score >= 5 else "#00CC44"
-        st.markdown(
-            f"<div style='font-size:13px;color:#888;margin-bottom:4px;'>"
-            f"Bond Stress Score</div>"
-            f"<div style='font-size:28px;font-weight:bold;color:{score_color};"
-            f"margin-bottom:12px;'>{panel_score} / 10</div>",
-            unsafe_allow_html=True,
-        )
-
         if y10yr is not None:
             render_status_badge(
-                "10-Year Yield", f"{y10yr:.2f}%",
-                _yield_status(y10yr),
-                "⚠️ Above 5.0% threshold" if y10yr >= 5.0 else "Key rate | threshold: 5.0%",
+                "10-Year Yield", f"{y10yr:.2f}%", _yield_status(y10yr),
+                "⚠️ Above 5.0% threshold" if y10yr >= 5.0 else "Key benchmark | threshold: 5.0%",
             )
         if y2yr is not None:
             render_status_badge(
-                "2-Year Yield", f"{y2yr:.2f}%",
-                _yield_status(y2yr),
-                "Short end — Fed policy sensitive",
-            )
-        if spread_bps is not None:
-            render_status_badge(
-                "2s10s Spread", f"{spread_bps:+.0f} bps",
-                _spread_status(spread_bps),
-                f"Regime: {curve_label}",
-            )
-        if tp is not None:
-            render_status_badge(
-                "10Y Term Premium", f"{tp:.2f}%",
-                _term_premium_status(tp),
-                "ACM estimate (NY Fed) | elevated = demand concerns",
-            )
-        if be is not None:
-            render_status_badge(
-                "10Y Breakeven Inflation", f"{be:.2f}%",
-                _breakeven_status(be),
-                "Market-implied 10yr avg inflation",
+                "2-Year Yield", f"{y2yr:.2f}%", _yield_status(y2yr),
+                "Near-term rate expectations | Fed policy sensitive",
             )
         if y30yr is not None:
             render_status_badge(
-                "30-Year Yield", f"{y30yr:.2f}%",
-                _yield_status(y30yr),
-                "Long end — supply/demand sensitive",
+                "30-Year Yield", f"{y30yr:.2f}%", _yield_status(y30yr),
+                "Most sensitive to fiscal confidence",
             )
         if y3m is not None:
             render_status_badge(
-                "3-Month Yield", f"{y3m:.2f}%",
-                "green",
-                "Near-term risk-free rate",
+                "3-Month T-Bill", f"{y3m:.2f}%", "green",
+                "Fed policy proxy",
+            )
+        if tp is not None:
+            render_status_badge(
+                "10Y Term Premium (ACM)", f"{tp:.2f}%", _term_premium_status(tp),
+                "Risk premium for holding duration | NY Fed estimate",
+            )
+        if be is not None:
+            render_status_badge(
+                "10Y Breakeven Inflation", f"{be:.2f}%", _breakeven_status(be),
+                "Bond market inflation expectation",
             )
 
-        st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
-        render_divergence_flag(data)
-
     with col_c:
-        render_yield_curve_chart(data, trading_days)
-        render_10yr_yield_chart(data, trading_days)
-        render_2s10s_chart(data, trading_days)
+        render_yield_curve_snapshot(data)
+        render_10yr_chart(data, trading_days)
         render_term_premium_chart(data, trading_days)
+
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
+
+    # ---- Sub-panel 3b: Yield Curve Shape ----
+    st.markdown("**Sub-panel 3b — Yield Curve Shape**")
+
+    col_b2, col_c2 = st.columns([1, 2])
+
+    with col_b2:
+        if spread_bps is not None:
+            render_status_badge(
+                "2s10s Spread (10Y − 2Y)", f"{spread_bps:+.0f} bps",
+                _2s10s_status(spread_bps),
+                "Recession predictor | inverted = elevated risk",
+            )
+        if spread_30s2s is not None:
+            render_status_badge(
+                "30s2s Spread (30Y − 2Y)", f"{spread_30s2s:+.0f} bps",
+                _30s2s_status(spread_30s2s),
+                "Long-end fiscal confidence",
+            )
+        if curve_label != "—":
+            regime_color = (
+                "red"    if curve_label in ("Bear Steepener", "Bear Flattener")
+                else "yellow" if curve_label in ("Bull Flattener",)
+                else "green"
+            )
+            render_status_badge(
+                "Curve Regime (20-day)", curve_label, regime_color,
+                "Based on 2yr yield direction + 2s10s spread change",
+            )
+
+    with col_c2:
+        render_spreads_chart(data, trading_days)
+
+    st.caption(
+        "Sources: FRED — DGS3MO, DGS2, DGS10, DGS30, T10YIE, THREEFYTP10, T10Y2Y. "
+        "~1 business day lag for daily series. "
+        "30s2s calculated from DGS30 − DGS2."
+    )

@@ -10,9 +10,9 @@ FRED_SERIES = {
     "breakeven_10yr":    "T10YIE",
     "term_premium_10yr": "THREEFYTP10",
     "spread_2s10s":      "T10Y2Y",
-    # Dollar/yield divergence
-    "dxy_proxy":         "DTWEXBGS",
-    # Credit Spreads (Phase 1 step 6)
+    # Panel 5 — Dollar & Credit (Phase 1 steps 5 & 6)
+    "dxy_proxy":         "DTWEXBGS",   # Trade-weighted USD (broad), not DXY
+    "usd_cad":           "DEXCAUS",    # USD/CAD exchange rate
     "ig_spread":         "BAMLC0A0CM",
     "hy_spread":         "BAMLH0A0HYM2",
 }

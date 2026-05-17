@@ -1,0 +1,446 @@
+MacroLens
+Product Requirements Document
+Version 1.0  |  May 2026
+1. Overview
+Field
+Detail
+Product Name
+MacroLens (working title)
+Version
+1.0
+Status
+Ready for Build
+Primary User
+Retail investor with high risk tolerance and quant background
+Stack
+Python / Streamlit / SQLite / FRED API / Bank of Canada Valet API
+MacroLens is a single-screen dashboard that aggregates, displays, and interprets the key macroeconomic indicators relevant to the US and Canadian bond crisis thesis. The goal is not just data display but signal interpretation — translating raw data into actionable crisis stage awareness.
+Core Question The Dashboard Answers
+Where are we in the crisis sequence, and what should I be watching right now?
+2. Design Principles
+Interpretation over raw data — every metric has a status (green/yellow/red) with a one-line interpretation, not just a number
+Signal hierarchy — indicators organised by crisis stage, not by category
+Minimal noise — only metrics that materially change the thesis are shown
+Interconnection awareness — show when multiple indicators are confirming each other
+Refresh cadence — clearly labelled when each data point was last updated and how frequently it updates
+3. Dashboard Structure
+The dashboard is organised into five panels corresponding to the crisis sequence, plus a Canada-specific panel and a global overview header.
+Panel 1 — Inflation Pressure Gauge
+Leading indicators showing where inflation is heading. Leads the crisis sequence by approximately 4 months.
+Metric
+Source
+Frequency
+Why It Matters
+CPI YoY %
+BLS
+Monthly
+Headline consumer inflation
+PPI YoY %
+BLS
+Monthly
+Leads CPI by ~2 months
+ISM Manufacturing Prices Paid
+ISM via FRED
+Monthly
+Leads PPI by ~2 months
+ISM Services Prices Paid
+ISM via FRED
+Monthly
+Leads PPI by ~2 months
+Oil Price YoY % Change
+WTI
+Daily
+Primary PPI driver
+10yr Breakeven Inflation Rate
+FRED
+Daily
+Bond market inflation expectation
+Interpretation Logic
+Status
+Conditions
+🟢 Green
+PPI below 3%, PMI prices paid below 55, oil YoY negative
+🟡 Yellow
+PPI 3–5%, PMI prices paid 55–65, oil YoY 0–20%
+🔴 Red
+PPI above 5%, PMI prices paid above 65, oil YoY above 20%
+Panel 2 — Consumer Stress Indicator
+Tracks how much pressure the inflation transmission to consumers is creating. Confirms whether demand destruction risk is materialising.
+Metric
+Source
+Frequency
+Why It Matters
+Real Wage Growth (MoM)
+BLS
+Monthly
+Inflation minus wage growth — purchasing power
+Personal Savings Rate
+BEA
+Monthly
+Buffer depletion indicator
+Revolving Credit Growth YoY
+Fed
+Monthly
+Credit card debt acceleration
+Credit Card Delinquency Rate
+Fed
+Quarterly
+Consumer debt stress signal
+UMich Consumer Sentiment
+UMich
+Monthly
+Forward-looking confidence
+UMich Current Conditions Index
+UMich
+Monthly
+Present conditions assessment
+Interpretation Logic
+Status
+Conditions
+🟢 Green
+Real wages positive, savings rate above 5%, delinquencies stable
+🟡 Yellow
+Real wages negative, savings rate 3–5%, delinquencies ticking up
+🔴 Red
+Real wages deeply negative, savings rate below 3%, delinquencies accelerating
+Panel 3 — Bond Market Stress Monitor
+The core crisis panel. Most critical to watch. Divided into three sub-panels.
+Sub-panel 3a: Yield Levels
+Metric
+Source
+Frequency
+Why It Matters
+3-month T-bill yield
+FRED
+Daily
+Fed policy proxy
+2-year Treasury yield
+FRED
+Daily
+Near-term rate expectations
+10-year Treasury yield
+FRED
+Daily
+Key benchmark — mortgages and corporate borrowing
+30-year Treasury yield
+FRED
+Daily
+Most sensitive to fiscal confidence
+10-year Breakeven Rate
+FRED
+Daily
+Inflation expectations
+10-year Term Premium (ACM)
+NY Fed via FRED
+Daily
+Risk premium for holding duration
+Key threshold alert: 10-year yield breaking above 5% triggers automatic red alert banner.
+Sub-panel 3b: Yield Curve Shape
+Metric
+Calculation
+Why It Matters
+2s10s Spread
+10yr minus 2yr
+Recession predictor
+30s2s Spread
+30yr minus 2yr
+Long-end fiscal confidence
+Bear Flattener/Steepener Flag
+Direction + spread change
+Crisis configuration identifier
+Visual: Real-time yield curve chart showing current curve vs 1 month ago vs 6 months ago.
+Sub-panel 3c: Auction Health
+Metric
+Source
+Frequency
+Why It Matters
+Bid-to-Cover Ratio
+Treasury Direct
+Per auction
+Demand for new debt issuance
+Auction Tail (bps)
+Treasury Direct
+Per auction
+Price concession required to clear
+Primary Dealer Takedown %
+NY Fed
+Per auction
+How much dealers had to absorb
+Auction Health Interpretation
+Status
+Conditions
+🟢 Green
+Bid-to-cover above 2.5, tail below 1bp, dealer takedown below 20%
+🟡 Yellow
+Bid-to-cover 2.0–2.5, tail 1–3bps
+🔴 Red
+Bid-to-cover below 2.0, tail above 3bps, dealer takedown above 30%
+Panel 4 — Foreign Demand Monitor
+Tracks the shrinking buyer base for US debt. TIC data is the primary signal — released monthly with a ~6 week lag.
+Metric
+Source
+Frequency
+Why It Matters
+TIC Data — Total Foreign Holdings
+US Treasury
+Monthly
+Aggregate foreign Treasury demand
+TIC Data — Japan Holdings
+US Treasury
+Monthly
+Largest foreign holder
+TIC Data — China Holdings
+US Treasury
+Monthly
+Geopolitically sensitive holder
+TIC Data — UK/Cayman Holdings
+US Treasury
+Monthly
+Proxy for hedge fund demand
+USD/JPY Rate
+FX market via FRED
+Daily
+Japanese capital flow indicator
+Eurozone Current Account Balance
+ECB
+Monthly
+European capacity to buy US debt
+US Current Account Deficit
+BEA via FRED
+Quarterly
+Overall foreign credit dependence
+Key visual: Waterfall chart showing change in foreign holdings by country over the past 12 months.
+Panel 5 — Dollar &amp; Credit Stress
+The crisis confirmation panel. The dollar/yield relationship is the single most important real-time crisis indicator.
+Sub-panel 5a: Dollar Signals
+Metric
+Source
+Frequency
+Why It Matters
+Trade Weighted USD Index
+FRED (DTWEXBGS)
+Daily
+Broad dollar strength
+USD/CAD
+FRED
+Daily
+Relevant to Canadian positioning
+Dollar/Yield Divergence Flag
+Calculated
+Daily
+THE primary crisis signal
+Dollar/Yield Divergence Flag Logic
+Condition
+Signal
+Interpretation
+10yr yield rising AND dollar rising
+🟡 Normal Stress
+Risk-off rotation within US assets — manageable
+10yr yield rising AND dollar falling
+🔴 Crisis Signal
+Capital flight from US assets entirely — Liz Truss territory
+Sub-panel 5b: Credit Spreads
+Metric
+Source
+Frequency
+Why It Matters
+IG Credit Spread (OAS)
+FRED (BAMLC0A0CM)
+Daily
+Investment grade stress
+HY Credit Spread (OAS)
+FRED (BAMLH0A0HYM2)
+Daily
+High yield / junk bond stress
+Credit Spread Interpretation
+Status
+IG Spread
+HY Spread
+🟢 Green
+Below 100bps
+Below 400bps
+🟡 Yellow
+100–200bps
+400–600bps
+🔴 Red
+Above 200bps
+Above 600bps
+Sub-panel 5c: Repo Market
+Metric
+Source
+Frequency
+Why It Matters
+SOFR Rate
+NY Fed via FRED
+Daily
+Overnight secured rate
+SOFR vs Fed Funds Spread
+Calculated
+Daily
+Repo market stress indicator
+Fed Balance Sheet Size
+Fed via FRED
+Weekly
+QE/QT posture
+Fed Balance Sheet WoW Change
+Calculated
+Weekly
+Active expansion/contraction signal
+Canada Panel
+Tracks Canadian-specific indicators given CAD portfolio exposure and Canada's unique vulnerability to a US crisis through trade concentration and housing.
+Metric
+Source
+Frequency
+Why It Matters
+2-year GoC yield
+Bank of Canada
+Daily
+BoC rate expectations
+10-year GoC yield
+Bank of Canada
+Daily
+Long-end Canadian benchmark
+GoC vs UST Spread (10yr)
+Calculated
+Daily
+Relative value — Canadian vs US bonds
+USD/CAD
+FRED
+Daily
+Currency positioning
+Oil Price (WCS)
+Markets
+Daily
+Canadian commodity proxy
+Canadian Housing Price Index
+CREA
+Monthly
+Key domestic vulnerability
+BoC Balance Sheet
+Bank of Canada
+Weekly
+Canadian QE/QT posture
+Canadian CPI
+StatsCan via FRED
+Monthly
+Domestic inflation
+Key relative value visual: GoC 10yr vs UST 10yr spread over time. Widening spread means Canadian bonds outperforming US bonds.
+4. Global Overview Panel
+A persistent header bar at the top of the dashboard showing the aggregated composite crisis stage.
+Stage
+Description
+Indicator
+Stage 0
+No significant stress
+🟢
+Stage 1
+Inflation pressure building
+🟡
+Stage 2
+Consumer stress emerging
+🟡
+Stage 3
+Bond market showing strain
+🔴
+Stage 4
+Foreign demand deteriorating
+🔴
+Stage 5
+Dollar/credit crisis signals active
+🔴 🚨
+Stage advancement logic: A stage activates when the majority of indicators within that panel are red, and all prior stage indicators remain elevated.
+5. Alerts System
+Threshold Alerts
+Push notification or email triggered when:
+10-year UST yield crosses 5%
+HY credit spreads cross 600bps
+Dollar/yield divergence flag activates
+Treasury auction tail exceeds 3bps
+Fed announces unscheduled asset purchases
+TIC data shows month-over-month decline above $50B
+Weekly Digest
+Which indicators changed status since last week
+Direction of composite scores
+Any new indicator confirmations across panels
+6. Data Sources
+Source
+Data
+Cost
+FRED (St. Louis Fed)
+Most US macro data — yields, spreads, CPI, PPI, Fed balance sheet
+Free API
+US Treasury TIC
+Foreign holdings of US Treasuries
+Free, monthly
+Treasury Direct
+Auction results — bid-to-cover, tail
+Free, per auction
+NY Fed
+Term premium, repo, SOFR
+Free
+BLS
+CPI, PPI, average hourly earnings
+Free API
+ISM via FRED
+PMI prices paid components
+Free via FRED
+ICE BofA via FRED
+Credit spreads (OAS)
+Free via FRED
+Bank of Canada Valet API
+GoC yields, BoC balance sheet
+Free API
+StatsCan via FRED
+Canadian CPI, current account
+Free API
+CREA
+Canadian housing price index
+Free monthly
+Note: Credit spread data (OAS) is the one area that may require a paid data source in future. ICE BofA data is available through FRED with a 1-day lag — acceptable for this use case.
+7. Technical Stack
+Component
+Technology
+Rationale
+Frontend
+Streamlit
+Fastest to build, deploys free on Streamlit Cloud, native Python
+Data fetching
+fredapi + requests
+Native FRED library, simple REST for BoC and Treasury
+Caching
+SQLite
+Prevents data loss on API failure, reduces API calls
+Charts
+Plotly
+Interactive, dark theme, strong financial chart support
+Scheduling
+APScheduler
+Background refresh without blocking Streamlit UI
+Alerts
+SMTP via Gmail
+Free, no additional service required
+Deployment
+Streamlit Cloud
+Free tier, Git-based deployment
+8. Build Sequence
+Phase 1 — MVP (Build First)
+Set up project structure and environment variables
+Implement FRED fetcher for Panel 3 series only (yields, spread, breakeven, term premium)
+Implement SQLite cache
+Build Panel 3 UI with yield curve chart and status badges
+Add dollar/yield divergence flag
+Add IG/HY credit spread charts
+Deploy to Streamlit Cloud
+Deliverable: Working bond stress monitor with live data.
+Phase 2 — Full Dashboard
+Add Panels 1 and 2 (all FRED — straightforward)
+Add composite panel scores and crisis stage banner
+Add Bank of Canada Valet API and Canada panel
+Add alerts engine and SMTP
+Add time range selector
+Phase 3 — Complete
+Add Treasury Direct auction data
+Add TIC foreign holdings parser
+Add repo market stress indicators
+Add weekly email digest
+MacroLens PRD v1.0  |  May 2026  |  Confidential
