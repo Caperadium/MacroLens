@@ -45,6 +45,15 @@ def init_db() -> None:
             credit_score    REAL,
             crisis_stage    INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS manual_inputs (
+            series_id       TEXT NOT NULL,
+            reference_month TEXT NOT NULL,
+            value           REAL NOT NULL,
+            entered_at      TEXT NOT NULL,
+            entered_by      TEXT DEFAULT 'user',
+            PRIMARY KEY (series_id, reference_month)
+        );
     """)
     conn.commit()
     conn.close()
@@ -144,3 +153,150 @@ def get_last_known_series(series_id: str) -> pd.Series | None:
     index = pd.to_datetime([r["date"] for r in rows])
     values = [r["value"] for r in rows]
     return pd.Series(values, index=index, name=series_id)
+
+
+# ---------------------------------------------------------------------------
+# Panel score history (used by weekly digest)
+# ---------------------------------------------------------------------------
+
+def write_panel_scores(scores: dict) -> None:
+    """Write current panel scores to the panel_scores table."""
+    conn = _connect()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO panel_scores
+            (calculated_at, inflation_score, consumer_score,
+             bonds_score, credit_score, crisis_stage)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.utcnow().isoformat(),
+            scores.get("inflation"),
+            scores.get("consumer"),
+            scores.get("bonds"),
+            scores.get("credit"),
+            scores.get("crisis_stage"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_panel_scores_7d_ago() -> dict | None:
+    """Return panel scores from approximately 7 days ago, or None if not available."""
+    cutoff_old = (datetime.utcnow() - timedelta(hours=8 * 24)).isoformat()
+    cutoff_new = (datetime.utcnow() - timedelta(hours=6 * 24)).isoformat()
+    conn = _connect()
+    row = conn.execute(
+        """
+        SELECT * FROM panel_scores
+        WHERE calculated_at BETWEEN ? AND ?
+        ORDER BY calculated_at DESC
+        LIMIT 1
+        """,
+        (cutoff_old, cutoff_new),
+    ).fetchone()
+    conn.close()
+    if row:
+        return {
+            "inflation":   row["inflation_score"],
+            "consumer":    row["consumer_score"],
+            "bonds":       row["bonds_score"],
+            "credit":      row["credit_score"],
+            "crisis_stage": row["crisis_stage"],
+        }
+    return None
+
+
+def get_recent_alerts(days_back: int = 7) -> list[dict]:
+    """Return alerts fired in the last days_back days."""
+    cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT alert_type, triggered_at, value_at_trigger, email_sent
+        FROM alert_history
+        WHERE triggered_at >= ?
+        ORDER BY triggered_at DESC
+        """,
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Manual input helpers (ISM, KC Fed — not available via free API)
+# ---------------------------------------------------------------------------
+
+def get_last_6_months() -> list[str]:
+    """Return list of 'YYYY-MM' strings for the current and prior 5 months."""
+    today = datetime.utcnow()
+    months = []
+    year, month = today.year, today.month
+    for _ in range(6):
+        months.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    return months
+
+
+def get_manual_input(series_id: str, reference_month: str) -> float | None:
+    """Return the stored value for a series/month, or None if not yet entered."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT value FROM manual_inputs WHERE series_id = ? AND reference_month = ?",
+        (series_id, reference_month),
+    ).fetchone()
+    conn.close()
+    return float(row["value"]) if row else None
+
+
+def get_manual_input_with_meta(
+    series_id: str, reference_month: str
+) -> dict | None:
+    """Return {'value': float, 'entered_at': str} or None."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT value, entered_at FROM manual_inputs "
+        "WHERE series_id = ? AND reference_month = ?",
+        (series_id, reference_month),
+    ).fetchone()
+    conn.close()
+    if row:
+        return {"value": float(row["value"]), "entered_at": row["entered_at"]}
+    return None
+
+
+def save_manual_input(series_id: str, reference_month: str, value: float) -> None:
+    """Upsert a manual input value."""
+    now = datetime.utcnow().isoformat()
+    conn = _connect()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO manual_inputs
+            (series_id, reference_month, value, entered_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (series_id, reference_month, value, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_current_month_manual() -> dict:
+    """Return manual inputs for the current month.
+
+    Returns dict with keys ism_mfg_prices, ism_svc_prices, kc_fed_prices_paid.
+    Values are float | None.
+    """
+    today = datetime.utcnow()
+    current_month = f"{today.year:04d}-{today.month:02d}"
+    return {
+        "ism_mfg_prices":    get_manual_input("ism_mfg_prices",    current_month),
+        "ism_svc_prices":    get_manual_input("ism_svc_prices",    current_month),
+        "kc_fed_prices_paid": get_manual_input("kc_fed_prices_paid", current_month),
+        "reference_month":   current_month,
+    }

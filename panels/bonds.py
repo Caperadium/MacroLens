@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import pandas as pd
 
 from data.fred import fetch_with_fallback
+from data.treasury import fetch_auctions_with_fallback
 from data.calculated import (
     classify_yield_curve_move,
     calculate_panel_score,
@@ -45,7 +46,10 @@ def load_bond_data() -> tuple[dict, dict]:
 def _current(s: pd.Series | None) -> float | None:
     if s is None or s.empty:
         return None
-    return float(s.dropna().iloc[-1])
+    clean = s.dropna()
+    if clean.empty:
+        return None
+    return float(clean.iloc[-1])
 
 
 def _offset(s: pd.Series | None, trading_days_back: int) -> float | None:
@@ -299,6 +303,139 @@ def render_spreads_chart(data: dict, trading_days: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sub-panel 3c — Auction Health
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def load_auction_data() -> tuple[dict, dict]:
+    """Fetch recent auctions for Bills, Notes, and Bonds."""
+    results, statuses = {}, {}
+    for sec_type in ("Bill", "Note", "Bond"):
+        df, status = fetch_auctions_with_fallback(sec_type)
+        results[sec_type]  = df
+        statuses[sec_type] = status
+    return results, statuses
+
+
+def _auction_btc_status(btc: float | None) -> str:
+    if btc is None:
+        return "green"
+    if btc < 2.0:
+        return "red"
+    if btc < 2.5:
+        return "yellow"
+    return "green"
+
+
+def _auction_dealer_status(pct: float | None) -> str:
+    if pct is None:
+        return "green"
+    if pct > 30:
+        return "red"
+    if pct > 20:
+        return "yellow"
+    return "green"
+
+
+def render_subpanel_3c() -> None:
+    """Sub-panel 3c — Treasury Auction Health (bid-to-cover, dealer takedown)."""
+    st.markdown("**Sub-panel 3c — Auction Health**")
+
+    with st.spinner("Loading auction data…"):
+        auction_data, auction_statuses = load_auction_data()
+
+    for sec_type, status in auction_statuses.items():
+        if status == "stale":
+            st.warning(f"⚠️ {sec_type} auctions: showing cached data.")
+        elif status == "error":
+            st.error(f"❌ {sec_type} auction data unavailable.")
+
+    for sec_type in ("Bill", "Note", "Bond"):
+        df = auction_data.get(sec_type, pd.DataFrame())
+        if df.empty:
+            st.caption(f"No {sec_type} auction data available.")
+            continue
+
+        st.markdown(f"*Treasury {sec_type}s — last {min(len(df), 5)} auctions*")
+
+        display_cols = ["auctionDate", "securityTerm", "bidToCoverRatio", "dealerTakedownPct"]
+        available = [c for c in display_cols if c in df.columns]
+        display_df = df[available].head(5).copy()
+
+        # Coerce numeric columns
+        for col in ["bidToCoverRatio", "dealerTakedownPct"]:
+            if col in display_df.columns:
+                display_df[col] = pd.to_numeric(display_df[col], errors="coerce")
+
+        rename = {
+            "auctionDate":      "Date",
+            "securityTerm":     "Term",
+            "bidToCoverRatio":  "Bid-to-Cover",
+            "dealerTakedownPct": "Dealer Takedown %",
+        }
+        display_df = display_df.rename(columns={k: v for k, v in rename.items() if k in display_df.columns})
+
+        # Format
+        if "Bid-to-Cover" in display_df.columns:
+            display_df["Bid-to-Cover"] = display_df["Bid-to-Cover"].apply(
+                lambda x: f"{x:.2f}" if pd.notna(x) else "—"
+            )
+        if "Dealer Takedown %" in display_df.columns:
+            display_df["Dealer Takedown %"] = display_df["Dealer Takedown %"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
+            )
+
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        # Latest auction badges
+        latest = df.iloc[0]
+        btc_val = pd.to_numeric(latest.get("bidToCoverRatio"), errors="coerce")
+        dealer_val = pd.to_numeric(latest.get("dealerTakedownPct"), errors="coerce")
+        btc_val = float(btc_val) if pd.notna(btc_val) else None
+        dealer_val = float(dealer_val) if pd.notna(dealer_val) else None
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            render_status_badge(
+                f"{sec_type} Bid-to-Cover (latest)",
+                f"{btc_val:.2f}" if btc_val is not None else "—",
+                _auction_btc_status(btc_val),
+                "🟢 ≥2.5 | 🟡 2.0–2.5 | 🔴 <2.0",
+            )
+        with col_b:
+            render_status_badge(
+                f"{sec_type} Dealer Takedown (latest)",
+                f"{dealer_val:.1f}%" if dealer_val is not None else "—",
+                _auction_dealer_status(dealer_val),
+                "🟢 <20% | 🟡 20–30% | 🔴 >30%",
+            )
+
+    st.caption(
+        "Source: Treasury Direct API. Tail calculation requires paid WI yield data — "
+        "not available from free APIs. Bid-to-cover and dealer takedown displayed only."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Score export (used by app.py for crisis stage banner)
+# ---------------------------------------------------------------------------
+
+def compute_bond_score(data: dict) -> float:
+    """Pure score calculation — no rendering. Called from app.py before panels render."""
+    y10yr  = _current(data.get("yield_10yr"))
+    tp     = _current(data.get("term_premium_10yr"))
+    be     = _current(data.get("breakeven_10yr"))
+    raw    = _current(data.get("spread_2s10s"))
+    spread = raw * 100 if raw is not None else None
+    return calculate_panel_score("bonds", {
+        "yield_10yr":              y10yr,
+        "term_premium":            tp,
+        "spread_2s10s_normalized": spread,
+        "breakeven_10yr":          be,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Active alert banners
 # ---------------------------------------------------------------------------
 
@@ -460,3 +597,8 @@ def render_panel_bonds(trading_days: int = 252) -> None:
         "~1 business day lag for daily series. "
         "30s2s calculated from DGS30 − DGS2."
     )
+
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
+
+    # ---- Sub-panel 3c: Auction Health ----
+    render_subpanel_3c()

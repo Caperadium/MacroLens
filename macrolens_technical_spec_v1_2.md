@@ -1,5 +1,5 @@
 # MacroLens — Technical Specification
-**Version:** 1.0  
+**Version:** 1.2  
 **Status:** Ready for build  
 **Stack:** Python 3.11+ / Streamlit / SQLite / FRED API / Bank of Canada Valet API
 
@@ -19,8 +19,8 @@
 └──────┬──────────┬──────────┬──────────┬─────────────┘
        │          │          │          │
 ┌──────▼──┐ ┌────▼────┐ ┌───▼───┐ ┌────▼──────────┐
-│  FRED   │ │  BoC    │ │  US   │ │  ISM / Other  │
-│   API   │ │ Valet   │ │Treas. │ │   (scrape)    │
+│  FRED   │ │  BoC    │ │  US   │ │  Manual Input │
+│   API   │ │ Valet   │ │Treas. │ │  (ISM / KC)   │
 └─────────┘ └─────────┘ └───────┘ └───────────────┘
        │
 ┌──────▼──────────────────────────────────────────────┐
@@ -124,10 +124,29 @@ series = fred.get_series("DGS10", observation_start="2020-01-01")
 |---|---|---|---|---|
 | `cpi` | `CPIAUCSL` | CPI All Urban Consumers | Monthly | YoY % = (current/prior_year - 1) * 100 |
 | `ppi` | `PPIACO` | PPI All Commodities | Monthly | YoY % = (current/prior_year - 1) * 100 |
-| `ism_mfg_prices` | `NAPMPRIC` | ISM Manufacturing Prices Paid Index | Monthly | Raw index value |
-| `ism_svc_prices` | `NMFPRC` | ISM Non-Manufacturing Prices Paid | Monthly | Raw index value |
+| `philly_fed_prices_paid` | `PPCDFSA066MSFRBPHI` | Philadelphia Fed Mfg Prices Paid Diffusion Index | Monthly | Raw diffusion index (% rising minus % falling) |
+| `dallas_fed_prices_paid` | `PRMUAMFRBDAL` | Dallas Fed Prices Paid for Raw Materials Diffusion Index | Monthly | Raw diffusion index (% rising minus % falling) |
 | `oil_wti` | `DCOILWTICO` | WTI Crude Oil Price (daily) | Daily | YoY % change |
 | `breakeven_10yr` | `T10YIE` | 10-Year Breakeven Inflation Rate | Daily | Raw % |
+
+**Manual Input Series (stored in SQLite, not fetched from API):**
+
+| Variable Name | Input Method | Description | Frequency | Transform |
+|---|---|---|---|---|
+| `ism_mfg_prices_manual` | Streamlit sidebar number input | ISM Manufacturing Prices Paid Index | Monthly | Raw 0–100 index value |
+| `ism_svc_prices_manual` | Streamlit sidebar number input | ISM Services Prices Paid Index | Monthly | Raw 0–100 index value |
+| `kc_fed_prices_paid_manual` | Streamlit sidebar number input | Kansas City Fed Prices Paid for Raw Materials | Monthly | Raw diffusion index |
+
+**Important scale difference:** Philadelphia Fed and Dallas Fed series use a **diffusion index scale** (% reporting increases minus % reporting decreases), typically ranging from roughly -50 to +80. This is different from ISM's 0–100 scale where 50 = neutral. The dashboard must display these with their own axis and thresholds — do NOT mix scales.
+
+**Diffusion index interpretation:**
+- Above 0 = prices rising on balance
+- The higher the positive reading, the more widespread price increases are
+- Threshold bands for Philly/Dallas: above 20 = 🟡 Yellow pressure, above 40 = 🔴 Red pressure
+
+**ISM index interpretation (manual input):**
+- Above 50 = prices rising on balance
+- Threshold bands: above 60 = 🟡 Yellow, above 65 = 🔴 Red
 
 #### Panel 2 — Consumer Stress
 
@@ -140,7 +159,6 @@ series = fred.get_series("DGS10", observation_start="2020-01-01")
 | `revolving_credit` | `REVOLSL` | Revolving Consumer Credit | Monthly | YoY % change |
 | `cc_delinquency` | `DRCCLACBS` | Credit Card Delinquency Rate | Quarterly | Raw % |
 | `umich_sentiment` | `UMCSENT` | UMich Consumer Sentiment | Monthly | Raw index |
-| `umich_conditions` | `UMCICR` | UMich Index of Current Economic Conditions | Monthly | Raw index |
 
 #### Panel 3 — Bond Market
 
@@ -258,10 +276,11 @@ tail_bps = (auction_high_yield - when_issued_yield) * 100
 
 ### 4.4 TIC Data — Foreign Treasury Holdings
 
-**Source:** US Treasury TIC monthly report  
-**URL pattern:** `https://ticdata.treasury.gov/resource-center/data-chart-center/tic/Documents/mfhhis.txt`  
-**Format:** Fixed-width text file, requires custom parser  
-**Frequency:** Monthly, released ~6 weeks after reference month
+**Source:** US Treasury Major Foreign Holders (MFH) flat file  
+**URL:** `https://ticdata.treasury.gov/Publish/mfhhis01.txt`  
+**Format:** Fixed-width text file — use `pd.read_fwf()`, not `read_csv()`  
+**Frequency:** Monthly, released ~6 weeks after reference month  
+**Note:** Country-level holdings are not available as individual FRED series. This is the single exception to the FRED-first data strategy — requires a `requests` fetch rather than `fredapi`.
 
 ```python
 import requests
@@ -270,30 +289,56 @@ from io import StringIO
 
 def get_tic_data() -> pd.DataFrame:
     """
-    Fetches TIC major foreign holders data.
-    Returns DataFrame with country, holdings ($B), and date.
+    Fetches TIC Major Foreign Holders data.
+    Returns DataFrame with columns: [date, total, uk_cayman, belgium, luxembourg, euroclear_proxy]
+    euroclear_proxy = belgium + luxembourg (combined Euroclear custodial proxy)
+    
+    ⚠️ Custodial bias note: Belgium and Luxembourg reflect Euroclear custody location,
+    not ultimate beneficial ownership. Display with caveat in UI — do not label as
+    'Eurozone holdings'.
     """
-    url = "https://ticdata.treasury.gov/resource-center/data-chart-center/tic/Documents/mfhhis.txt"
+    url = "https://ticdata.treasury.gov/Publish/mfhhis01.txt"
     response = requests.get(url, timeout=15)
     response.raise_for_status()
     
-    # Parse fixed-width format — first column is country name,
-    # subsequent columns are monthly holdings in $B
-    # Implementation requires careful column alignment parsing
-    # See Treasury documentation for exact column widths
-    lines = response.text.split('\n')
-    # Skip header rows (typically first 5-7 lines)
-    # Extract: Japan, China (Mainland), United Kingdom, 
-    #          Cayman Islands, Canada, All Other
-    countries_to_track = [
-        "Japan", "China, Mainland", "United Kingdom", 
-        "Cayman Islands", "Canada"
-    ]
-    # Return most recent 12 months for each country
+    df = pd.read_fwf(StringIO(response.text), header=None)
+    
+    # Row labels to extract — match exact strings from MFH file
+    ROWS_TO_TRACK = {
+        "Grand Total":      "total_foreign",
+        "United Kingdom":   "united_kingdom",
+        "Cayman Islands":   "cayman_islands",
+        "Belgium":          "belgium",
+        "Luxembourg":       "luxembourg",
+    }
+    
+    # Parse header row for month columns, skip preamble rows
+    # File structure: country name in col 0, monthly values in subsequent cols
+    # Most recent month in leftmost data column
+    # Returns last 24 months for each tracked series
+    
+    # After extraction, calculate derived series:
+    # uk_cayman = united_kingdom + cayman_islands
+    # euroclear_proxy = belgium + luxembourg
+    
+    # Return long-format DataFrame:
+    # columns: [date, series_id, value_usd_billions]
     ...
+
+def get_total_foreign_holdings() -> pd.Series:
+    """
+    Returns monthly total foreign holdings time series ($B).
+    Primary metric for Panel 4 composite score.
+    Also calculates MoM change for alert threshold ($50B decline).
+    """
+    df = get_tic_data()
+    return df[df["series_id"] == "total_foreign"].set_index("date")["value_usd_billions"]
 ```
 
-**Note:** TIC parsing is the most complex data ingestion task. Recommend building this in Phase 2. For Phase 1 MVP, display a static note that TIC data requires manual monthly update or Phase 2 implementation.
+**Cache strategy:** TIC data changes monthly. Cache with 7-day TTL. On fetch failure, serve stale cache and display reference month clearly with lag warning.
+
+**Alert threshold:** TIC data triggers an alert when total foreign holdings decline by more than $50B month-over-month (per PRD Section 5).
+
 
 ---
 
@@ -464,8 +509,22 @@ SCORE_THRESHOLDS = {
         # (upper_bound, score) — first match wins, ascending order
         "bands": [(2.0, 2), (3.0, 4), (4.0, 6), (5.0, 8), (float('inf'), 10)],
     },
-    "ism_avg_prices": {
+    "philly_fed_prices_paid": {
+        # Diffusion index scale — above 0 = rising prices, above 40 = significant pressure
+        "bands": [(-float('inf'), 1), (0, 3), (20, 5), (40, 8), (float('inf'), 10)],
+    },
+    "dallas_fed_prices_paid": {
+        # Same diffusion index scale as Philly
+        "bands": [(-float('inf'), 1), (0, 3), (20, 5), (40, 8), (float('inf'), 10)],
+    },
+    "ism_mfg_prices_manual": {
+        # ISM 0-100 scale, 50 = neutral. Used only if manually entered, else excluded from score
         "bands": [(50, 2), (55, 4), (60, 6), (65, 8), (float('inf'), 10)],
+        "optional": True  # Excluded from composite if not entered this month
+    },
+    "ism_svc_prices_manual": {
+        "bands": [(50, 2), (55, 4), (60, 6), (65, 8), (float('inf'), 10)],
+        "optional": True
     },
     "oil_yoy": {
         "bands": [(0, 2), (10, 4), (20, 6), (35, 8), (float('inf'), 10)],
@@ -503,9 +562,13 @@ SCORE_THRESHOLDS = {
 PANEL_WEIGHTS = {
     "inflation": {
         "ppi_yoy": 0.30,
-        "ism_avg_prices": 0.25,
+        "philly_fed_prices_paid": 0.15,   # Regional proxy — lower weight than ISM
+        "dallas_fed_prices_paid": 0.15,   # Regional proxy — lower weight than ISM
         "oil_yoy": 0.25,
-        "breakeven_10yr": 0.20,
+        "breakeven_10yr": 0.15,
+        # ism_mfg_prices_manual and ism_svc_prices_manual are ADDITIVE OVERRIDES:
+        # If ISM data is entered this month, substitute their average for the two
+        # regional fed scores entirely and reweight: ppi=0.30, ism_avg=0.25, oil=0.25, breakeven=0.20
     },
     "consumer": {
         "real_wage_growth": 0.35,
@@ -554,7 +617,7 @@ def calculate_crisis_stage(panel_scores: dict) -> dict:
         "inflation": float,
         "consumer": float,
         "bonds": float,
-        "foreign": float,  # Manual/Phase 2
+        "foreign": float,  # Driven by total foreign holdings MoM trend — Phase 3
         "credit": float
     }
     
@@ -566,7 +629,7 @@ def calculate_crisis_stage(panel_scores: dict) -> dict:
     Stage 1: Inflation >= 6
     Stage 2: Stage 1 + Consumer >= 5
     Stage 3: Stage 2 + Bonds >= 6
-    Stage 4: Stage 3 + Foreign demand deteriorating (manual flag for MVP)
+    Stage 4: Stage 3 + Foreign demand deteriorating (total holdings declining MoM — Phase 3)
     Stage 5: Stage 4 + Credit >= 7 OR dollar/yield divergence active
     """
     inflation = panel_scores.get("inflation", 0)
@@ -665,6 +728,7 @@ def get_last_known_value(series_id: str) -> float | None:
 | Daily market data (yields, spreads, FX) | Every 4 hours on weekdays | 4 hours |
 | Weekly data (Fed balance sheet) | Once per week (Thursday after 4:30pm ET) | 7 days |
 | Monthly data (CPI, PPI, PMI, savings) | Once per day (checks for new release) | 24 hours |
+| Monthly TIC data (MFH file) | Once per day (checks for new release ~6 weeks after reference month) | 7 days |
 | Quarterly data (current account, delinquency) | Once per day (checks for new release) | 24 hours |
 | Auction data | After each auction (check daily) | 24 hours |
 
@@ -872,10 +936,12 @@ render_panel_foreign()
 | 10yr yield over time | Line chart with threshold line | Plotly | Add horizontal line at 5.0% in red |
 | 2s10s spread | Area chart | Plotly | Fill below zero in red, above zero in green |
 | CPI vs PPI | Dual line chart | Plotly | CPI in white, PPI in orange |
-| ISM prices paid | Bar chart | Plotly | Color bars by threshold band |
+| Regional Fed prices paid | Dual bar chart | Plotly | Philly Fed in blue, Dallas Fed in teal, side-by-side bars, color bars by threshold band. Note separate y-axis from ISM panel |
+| ISM manual input panel | Number input widgets + static badges | Streamlit | Sidebar inputs, last-entered value displayed with entry date |
 | Credit spreads | Line chart | Plotly | IG in blue, HY in orange |
 | Fed balance sheet | Area chart | Plotly | WoW change as bar overlay |
 | GoC vs UST spread | Line chart | Plotly | Spread widening = Canadian outperformance |
+| Foreign holdings (Panel 4) | Bar chart (monthly total $B, 24 months) + line overlay | Plotly | Bars = total foreign holdings level; line = MoM change. Secondary y-axis for MoM change. Display Euroclear proxy (Belgium+Luxembourg) and UK/Cayman as stacked reference bars beneath total. Add caveat annotation on Euroclear bars: "Custodial location — not ultimate ownership" |
 
 **Plotly theme:**
 ```python
@@ -949,7 +1015,101 @@ def render_stale_warning(series_name: str, last_updated: str):
 
 ---
 
-## 10. Error Handling Specification
+## 8b. Manual Input System
+
+ISM and Kansas City Fed prices paid data are not available via free API. The dashboard handles these through a persistent manual input system.
+
+### SQLite Schema Addition
+
+```sql
+CREATE TABLE IF NOT EXISTS manual_inputs (
+    series_id TEXT NOT NULL,         -- e.g. "ism_mfg_prices", "ism_svc_prices", "kc_fed_prices"
+    reference_month TEXT NOT NULL,   -- ISO format YYYY-MM (the month the data refers to)
+    value REAL NOT NULL,
+    entered_at TEXT NOT NULL,        -- ISO datetime of manual entry
+    entered_by TEXT DEFAULT 'user',
+    PRIMARY KEY (series_id, reference_month)
+);
+```
+
+### Streamlit UI — Manual Input Panel
+
+```python
+def render_manual_input_sidebar():
+    """
+    Rendered in st.sidebar. Collapsible expander labelled "Manual Data Entry".
+    Shows on every page load. Current month pre-selected.
+    """
+    with st.sidebar.expander("📝 Manual Data Entry", expanded=False):
+        st.caption("ISM and KC Fed data — enter after each monthly release")
+        
+        # Month selector — defaults to current month
+        reference_month = st.selectbox(
+            "Reference Month",
+            options=get_last_6_months(),  # ["2026-05", "2026-04", ...]
+            index=0
+        )
+        
+        st.markdown("**ISM Manufacturing Prices Paid** (0–100 scale, 50=neutral)")
+        st.caption("Released first business day of month — ismworld.org")
+        ism_mfg = st.number_input(
+            "ISM Mfg Prices Paid", 
+            min_value=0.0, max_value=100.0, step=0.1,
+            value=get_manual_input("ism_mfg_prices", reference_month) or 0.0,
+            key=f"ism_mfg_{reference_month}"
+        )
+        
+        st.markdown("**ISM Services Prices Paid** (0–100 scale, 50=neutral)")
+        st.caption("Released third business day of month — ismworld.org")
+        ism_svc = st.number_input(
+            "ISM Svc Prices Paid",
+            min_value=0.0, max_value=100.0, step=0.1,
+            value=get_manual_input("ism_svc_prices", reference_month) or 0.0,
+            key=f"ism_svc_{reference_month}"
+        )
+        
+        st.markdown("**KC Fed Prices Paid — Raw Materials** (diffusion index)")
+        st.caption("Released ~4th week of month — kansascityfed.org/surveys/manufacturing-survey")
+        kc_fed = st.number_input(
+            "KC Fed Prices Paid",
+            min_value=-100.0, max_value=100.0, step=0.1,
+            value=get_manual_input("kc_fed_prices_paid", reference_month) or 0.0,
+            key=f"kc_fed_{reference_month}"
+        )
+        
+        if st.button("Save Manual Inputs"):
+            save_manual_input("ism_mfg_prices", reference_month, ism_mfg)
+            save_manual_input("ism_svc_prices", reference_month, ism_svc)
+            save_manual_input("kc_fed_prices_paid", reference_month, kc_fed)
+            st.success(f"Saved for {reference_month}")
+
+def get_manual_input(series_id: str, reference_month: str) -> float | None:
+    """Returns stored value or None if not yet entered for this month."""
+
+def save_manual_input(series_id: str, reference_month: str, value: float) -> None:
+    """Upserts into manual_inputs table."""
+```
+
+### Display Behaviour
+
+- If ISM data entered for current month: display ISM values prominently in Panel 1 with green "✓ Current" badge, use ISM weights in composite score
+- If ISM data NOT entered for current month: display Philly Fed + Dallas Fed as primary proxies, show grey "⚠️ ISM pending — showing regional proxies" note
+- KC Fed: displayed as supplementary indicator alongside Philly and Dallas, does not affect composite score weighting
+- All manual inputs show "Last entered: [datetime]" and "For: [reference_month]" labels
+
+### Release Calendar Reference (hardcoded in config.py)
+
+```python
+MANUAL_RELEASE_SCHEDULE = {
+    "ism_mfg_prices": "First business day of the following month — ismworld.org",
+    "ism_svc_prices": "Third business day of the following month — ismworld.org",
+    "kc_fed_prices_paid": "Fourth week of the current month — kansascityfed.org",
+}
+```
+
+---
+
+
 
 ```python
 # Every API fetch follows this pattern:
@@ -1019,8 +1179,11 @@ def fetch_with_fallback(series_id: str, fetcher_func: callable) -> pd.Series:
 | Limitation | Impact | Mitigation |
 |---|---|---|
 | FRED data lags by 1 business day for daily series | Minor | Display "as of [date]" clearly |
-| ISM data available via FRED with ~1 day lag | Acceptable | Note source and lag on panel |
-| TIC data released 6 weeks after reference month | Significant lag for foreign demand panel | Display reference month clearly, note lag |
+| ISM data not available via free API — proprietary | Panel 1 uses regional proxies when ISM not entered | Manual input sidebar — enter after each monthly release from ismworld.org |
+| Philly Fed and Dallas Fed use diffusion index scale (not 0–100) | Cannot directly compare to ISM | Separate display with clearly labelled scale; composite score uses threshold bands calibrated per series |
+| KC Fed prices paid not on FRED — manual input only | Supplementary indicator only | Enter monthly from kansascityfed.org; not included in composite score weighting |
+| TIC data released 6 weeks after reference month | Significant lag for foreign demand panel | Display reference month clearly, note lag. Cache with 7-day TTL |
+| TIC country data not on FRED — requires direct Treasury MFH file fetch | Single exception to FRED-first strategy | `requests` fetch of `ticdata.treasury.gov/Publish/mfhhis01.txt` via `pd.read_fwf()`. Belgium+Luxembourg combined as Euroclear proxy — UI must display custodial bias caveat |
 | Auction tail requires paid WI yield data | Bid-to-cover only for MVP | Note limitation on panel |
 | DTWEXBGS is not DXY exactly | Slight index difference | Label as "Trade Weighted USD Index" not DXY |
 | BoC Valet API has no authentication — may change | API availability risk | Cache aggressively, 7-day TTL for BoC data |
